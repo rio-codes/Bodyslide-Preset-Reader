@@ -9,8 +9,8 @@ namespace Primary {
 
     // raw slider struct
     struct slider {
-        float max;
-        float min;
+        float min = 0.0f;
+        float max = 0.0f;
         std::string name = "";
     };
 

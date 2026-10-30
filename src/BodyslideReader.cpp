@@ -102,26 +102,29 @@ namespace Presets {
 
         // takes the list as a pointer
         void ParsePreset(std::string filename, std::vector<bodypreset>* femalelist, std::vector<bodypreset>* malelist) {
-            std::string* presetname{new std::string};
-            std::string* bodytype{new std::string};
-            std::vector<std::string>* presetgroups{new std::vector<std::string>};
-
-            xml_document<>* preset{new xml_document};
-            xml_node<>* root_node = NULL;
-
             logger::trace("Beginning xml parse...");
 
             // suck the xml into the buffer
             std::ifstream inputFile(filename);
+            if (!inputFile.is_open()) {
+                logger::warn("Failed to open preset file: {}", filename);
+                return;
+            }
             std::vector<char> buffer((std::istreambuf_iterator<char>(inputFile)), std::istreambuf_iterator<char>());
             buffer.push_back('\0');
 
-            // parse the buffer
-            preset->parse<0>(&buffer[0]);
+            xml_document<> preset;
+            try {
+                // parse the buffer
+                preset.parse<0>(&buffer[0]);
+            } catch (const std::exception& e) {
+                logger::warn("XML parse error in {}: {}", filename, e.what());
+                return;
+            }
 
             logger::trace("Buffer has been parsed.");
             //  find the root
-            root_node = preset->first_node("SliderPresets");
+            xml_node<>* root_node = preset.first_node("SliderPresets");
             if (!root_node) {
                 logger::trace("Empty xml! Ignoring.");
                 return;
@@ -130,147 +133,147 @@ namespace Presets {
             // for each preset, grab its name and go through the sliders.
             for (xml_node<>* preset_node = root_node->first_node("Preset"); preset_node;
                  preset_node = preset_node->next_sibling("Preset")) {
-                std::vector<slider>* sliderset{new std::vector<slider>};
 
                 // we need this for the set of sets, to identify them.
-                *presetname = preset_node->first_attribute()->value();
+                auto name_attr = preset_node->first_attribute("name");
+                std::string presetname = name_attr ? name_attr->value() : (preset_node->first_attribute() ? preset_node->first_attribute()->value() : "");
 
-                // fill the group vector with groups to identify the sex of the preset.
-                for (xml_node<>* cat_node = preset_node->first_node("Group"); cat_node;
-                     cat_node = cat_node->next_sibling("Group")) {
-                    logger::trace("Adding {} to group list!", cat_node->first_attribute()->value());
-                    presetgroups->push_back(cat_node->first_attribute()->value());
-                }
-
-                logger::trace("preset name being loaded is {}", *presetname);
+                logger::trace("preset name being loaded is {}", presetname);
                 std::vector<std::string> discardkeywords{"Cloth",  "cloth",    "Outfit", "outfit", "NeverNude",
                                                          "Bikini", "Feet",     "Hands",  "OUTFIT", "push",
                                                          "Push",   "Cleavage", "Armor",  "Bra"};
                 // discard clothed presets.
-                if (Presets::Parsing::contains({*presetname}, discardkeywords)) {
+                if (Presets::Parsing::contains({presetname}, discardkeywords)) {
                     logger::trace("Clothed preset found. Discarding.");
                     continue;
                 }
 
-                // for finding if we need to check for inverted sliders
-                bool UUNP = false;
-                *bodytype = preset_node->last_attribute()->value();
-
-                if (bodytype->find("UNP") != -1) {
-                    logger::trace("UUNP preset found. Now inverting sliders.");
-                    UUNP = true;
+                // fill the group vector with groups for THIS preset only to identify its sex.
+                std::vector<std::string> presetgroups;
+                for (xml_node<>* cat_node = preset_node->first_node("Group"); cat_node;
+                     cat_node = cat_node->next_sibling("Group")) {
+                    if (cat_node->first_attribute()) {
+                        logger::trace("Adding {} to group list!", cat_node->first_attribute()->value());
+                        presetgroups.push_back(cat_node->first_attribute()->value());
+                    }
                 }
 
-                // logger::debug("{} has entered the outer for loop", *presetname);
-                std::string* slidername{new std::string};
-                std::string* previousslidername{new std::string("")};
+                // for finding if we need to check for inverted sliders
+                bool UUNP = false;
+                auto set_attr = preset_node->first_attribute("set");
+                if (set_attr && std::string(set_attr->value()).find("UNP") != std::string::npos) {
+                    logger::trace("UUNP preset found via set attribute. Now inverting sliders.");
+                    UUNP = true;
+                } else {
+                    for (const std::string& group : presetgroups) {
+                        if (group.find("UNP") != std::string::npos) {
+                            logger::trace("UUNP preset found via group. Now inverting sliders.");
+                            UUNP = true;
+                            break;
+                        }
+                    }
+                }
 
-                std::string* size{new std::string("")};
-                std::string* lastSize{new std::string("")};
-                float defaultvalue = 0;
-                float* sizevalue{new float{0}};
-                float* lastsizevalue{new float{0}};
+                std::vector<slider> sliderset;
+                std::string previousslidername = "";
+                std::string lastSize = "";
+                float lastsizevalue = 0.0f;
+
                 // go through the sliders
                 for (xml_node<>* slider_node = preset_node->first_node("SetSlider"); slider_node;
                      slider_node = slider_node->next_sibling("SetSlider")) {
-                    // store the current values of this node
-                    *slidername = slider_node->first_attribute()->value();
-                    *size = slider_node->first_attribute("size")->value();
-                    auto printable = *slidername;
-                    // logger::debug("The slider being looked at is {} and it is {}", printable, *size);
-                    //  convert the size to a morphable value (those are -1 to 1.)
-                    *sizevalue = std::stoi(slider_node->first_attribute("value")->value()) / 100.0f;
-                    // logger::debug("The converted value of that slider is {}", *sizevalue);
+                    auto slider_name_attr = slider_node->first_attribute("name");
+                    std::string slidername = slider_name_attr ? slider_name_attr->value() : (slider_node->first_attribute() ? slider_node->first_attribute()->value() : "");
+
+                    auto size_attr = slider_node->first_attribute("size");
+                    std::string size = size_attr ? size_attr->value() : "";
+
+                    auto val_attr = slider_node->first_attribute("value");
+                    float sizevalue = 0.0f;
+                    if (val_attr) {
+                        try {
+                            sizevalue = std::stoi(val_attr->value()) / 100.0f;
+                        } catch (...) {
+                            sizevalue = 0.0f;
+                        }
+                    }
+
                     // if we detect that a preset is UUNP based, invert the sliders.
                     bool inverted = false;
                     if (UUNP) {
-                        for (std::string slider : DefaultSliders) {
-                            if (*slidername == slider) {
+                        for (const std::string& slider : DefaultSliders) {
+                            if (slidername == slider) {
                                 logger::trace("UUNP backwards slider found! Inverting...");
-                                *sizevalue = 1.0f - *sizevalue;
+                                sizevalue = 1.0f - sizevalue;
                                 inverted = true;
                                 break;
                             }
                         }
                     }
+
                     // if a pair is found, push it into the sliderset vector as a full struct.
-                    if (*slidername == *previousslidername) {
-                        // logger::debug("{} is a paired slider and is being pushed back with a pair of values of {} and
-                        // {}", *slidername, *lastsizevalue, *sizevalue);
-
-                        sliderset->push_back({*lastsizevalue, *sizevalue, *slidername});
+                    if (slidername == previousslidername) {
+                        float lowVal = (lastSize == "small") ? lastsizevalue : sizevalue;
+                        float highVal = (size == "big") ? sizevalue : lastsizevalue;
+                        slider s;
+                        s.name = slidername;
+                        s.min = lowVal;
+                        s.max = highVal;
+                        sliderset.push_back(s);
                     }
-
                     // if a pair is not found, evaluate which half it is and then push it as a
                     // full struct with default values where they belong.
-                    else if (*slidername != *previousslidername) {
-                        if (!slider_node->next_sibling() ||
-                            slider_node->next_sibling()->first_attribute()->value() != *slidername) {
-                            // logger::debug("slider {} is a singlet", *slidername);
-                            if (inverted) {
-                                defaultvalue -= 1.0f;
-                            }
+                    else if (slidername != previousslidername) {
+                        xml_node<>* next_node = slider_node->next_sibling("SetSlider");
+                        std::string next_name = "";
+                        if (next_node) {
+                            auto next_name_attr = next_node->first_attribute("name");
+                            next_name = next_name_attr ? next_name_attr->value() : (next_node->first_attribute() ? next_node->first_attribute()->value() : "");
+                        }
 
-                            if (*size == "big") {
-                                // logger::trace("It's a biggun");
-                                sliderset->push_back({*sizevalue, defaultvalue, *slidername});
+                        if (next_name != slidername) {
+                            float defaultvalue = inverted ? 1.0f : 0.0f;
+                            slider s;
+                            s.name = slidername;
+                            if (size == "big") {
+                                s.min = defaultvalue;
+                                s.max = sizevalue;
                             } else {
-                                // logger::trace("It's a smallun;");
-                                sliderset->push_back({defaultvalue, *sizevalue, *slidername});
+                                s.min = sizevalue;
+                                s.max = defaultvalue;
                             }
-                            // yet another inversion check for UUNP support.
+                            sliderset.push_back(s);
                         }
                     }
 
-                    *previousslidername = *slidername;
-                    *lastSize = *size;
-                    *lastsizevalue = *sizevalue;
-                    // logger::debug("At the end of pushback we have a slider name of {} and a value of {}",
-                    // *slidername, *sizevalue);
-                    //  std::cout << " values: " << slidername << ",  " << size << ",  " <<
-                    //  sizevalue << std::endl;
+                    previousslidername = slidername;
+                    lastSize = size;
+                    lastsizevalue = sizevalue;
                 }
 
-                // clean up memory
-                delete slidername;
-                delete previousslidername;
-                delete sizevalue;
-                delete lastsizevalue;
-                delete size;
-                delete lastSize;
-
-                slidername = nullptr;
-                previousslidername = nullptr;
-                sizevalue = nullptr;
-                lastsizevalue = nullptr;
-                size = nullptr;
-                lastSize = nullptr;
-
-                // push the preset into the master list, then erase the sliderset to startagain.
+                // push the preset into the master list based on groups for THIS preset
                 bool fail = true;
-                for (std::string item : *presetgroups) {
-                    if (item.find("CBBE") != -1 || item.find("3BBB") != -1 || item.find("CBAdvanced") != -1 ||
-                        (item.find("UNP") != -1) || item.find("TBD") != -1) {
-                        logger::info("{} has been added to the female preset list.", *presetname);
+                for (const std::string& item : presetgroups) {
+                    if (item.find("CBBE") != std::string::npos || item.find("3BBB") != std::string::npos ||
+                        item.find("CBAdvanced") != std::string::npos || item.find("UNP") != std::string::npos ||
+                        item.find("TBD") != std::string::npos) {
+                        logger::info("{} has been added to the female preset list.", presetname);
                         fail = false;
-                        femalelist->push_back(bodypreset{*sliderset, *presetname});
+                        femalelist->push_back(bodypreset{sliderset, presetname});
                         break;
-                    } else if (item.find("HIMBO") != -1 || item.find("SOS") != -1 || item.find("SAM") != -1) {
-                        logger::info("{} has been added to the male preset list.", *presetname);
+                    } else if (item.find("HIMBO") != std::string::npos || item.find("SOS") != std::string::npos ||
+                               item.find("SAM") != std::string::npos) {
+                        logger::info("{} has been added to the male preset list.", presetname);
                         fail = false;
-                        malelist->push_back(bodypreset{*sliderset, *presetname});
+                        malelist->push_back(bodypreset{sliderset, presetname});
                         break;
                     }
                 }
                 if (fail) {
                     logger::info("{} is not assigned to any supported preset groups! It will not be loaded.",
-                                 *presetname);
+                                 presetname);
                 }
-                delete sliderset;
             }
-            //  clean up memory
-            delete presetgroups;
-            presetgroups = nullptr;
 
             return;
         }
@@ -343,8 +346,8 @@ std::vector<std::float_t> BodyslideReader::GetPresetSliderLows(std::string name)
         for (int i = 0; i < presetcontainer->femaleMasterSet.size(); ++i) {
         if (presetcontainer->femaleMasterSet[i].name == name) {
             logger::info("GetPresetSliderLows Passed female compare!");
-            bodypreset preset = (presetcontainer->femaleMasterSet[i]);
-            for (slider bar : preset.sliderlist) {
+            const bodypreset& preset = (presetcontainer->femaleMasterSet[i]);
+            for (const slider& bar : preset.sliderlist) {
                 returnarray.push_back(bar.min);
             }
             return returnarray;
@@ -354,8 +357,8 @@ std::vector<std::float_t> BodyslideReader::GetPresetSliderLows(std::string name)
         for (int i = 0; i < presetcontainer->maleMasterSet.size(); ++i) {
         if (presetcontainer->maleMasterSet[i].name == name) {
             logger::info("GetPresetSliderLows Passed male compare!");
-            bodypreset preset = (presetcontainer->maleMasterSet[i]);
-            for (slider bar : preset.sliderlist) {
+            const bodypreset& preset = (presetcontainer->maleMasterSet[i]);
+            for (const slider& bar : preset.sliderlist) {
                 returnarray.push_back(bar.min);
             }
             return returnarray;
@@ -377,8 +380,8 @@ std::vector<std::float_t> BodyslideReader::GetPresetSliderHighs(std::string name
         for (int i = 0; i < presetcontainer->femaleMasterSet.size(); ++i) {
         if (presetcontainer->femaleMasterSet[i].name == name) {
             logger::info("GetPresetSliderHighs Passed female compare!");
-            bodypreset preset = (presetcontainer->femaleMasterSet[i]);
-            for (slider bar : preset.sliderlist) {
+            const bodypreset& preset = (presetcontainer->femaleMasterSet[i]);
+            for (const slider& bar : preset.sliderlist) {
                 returnarray.push_back(bar.max);
             }
             return returnarray;
@@ -388,8 +391,8 @@ std::vector<std::float_t> BodyslideReader::GetPresetSliderHighs(std::string name
         for (int i = 0; i < presetcontainer->maleMasterSet.size(); ++i) {
         if (presetcontainer->maleMasterSet[i].name == name) {
             logger::info("GetPresetSliderHighs Passed male compare!");
-            bodypreset preset = (presetcontainer->maleMasterSet[i]);
-            for (slider bar : preset.sliderlist) {
+            const bodypreset& preset = (presetcontainer->maleMasterSet[i]);
+            for (const slider& bar : preset.sliderlist) {
                 returnarray.push_back(bar.max);
             }
             return returnarray;
@@ -410,8 +413,8 @@ std::vector<std::string> BodyslideReader::GetPresetSliderStrings(std::string nam
         for (int i = 0; i < presetcontainer->femaleMasterSet.size(); ++i) {
         if (presetcontainer->femaleMasterSet[i].name == name) {
             logger::info("GetPresetSliderStrings Passed female compare!");
-            bodypreset preset = (presetcontainer->femaleMasterSet[i]);
-            for (slider bar : preset.sliderlist) {
+            const bodypreset& preset = (presetcontainer->femaleMasterSet[i]);
+            for (const slider& bar : preset.sliderlist) {
                 returnarray.push_back(bar.name);
             }
             return returnarray;
@@ -421,8 +424,8 @@ std::vector<std::string> BodyslideReader::GetPresetSliderStrings(std::string nam
         for (int i = 0; i < presetcontainer->maleMasterSet.size(); ++i) {
         if (presetcontainer->maleMasterSet[i].name == name) {
             logger::info("GetPresetSliderStrings Passed male compare!");
-            bodypreset preset = (presetcontainer->maleMasterSet[i]);
-            for (slider bar : preset.sliderlist) {
+            const bodypreset& preset = (presetcontainer->maleMasterSet[i]);
+            for (const slider& bar : preset.sliderlist) {
                 returnarray.push_back(bar.name);
             }
             return returnarray;
